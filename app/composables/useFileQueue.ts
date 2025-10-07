@@ -5,6 +5,77 @@ import { useMetadata } from './useMetadata'
 import { downloadBlob } from '@/utils/blob'
 import { formatBytes } from '@/utils/sanitize'
 
+interface WorkerResponse {
+  buffer: ArrayBuffer
+  mimeType: string
+}
+
+type CleanerOptions = Record<string, unknown>
+
+const imageWorkerUrl = import.meta.client
+  ? new URL('@/workers/imageWorker.ts', import.meta.url)
+  : null
+const pdfWorkerUrl = import.meta.client
+  ? new URL('@/workers/pdfWorker.ts', import.meta.url)
+  : null
+const videoWorkerUrl = import.meta.client
+  ? new URL('@/workers/videoWorker.ts', import.meta.url)
+  : null
+
+async function runWorker<T extends WorkerResponse>(
+  url: URL | null,
+  payload: Record<string, unknown>,
+  transfer: ArrayBuffer[] = []
+): Promise<T> {
+  if (!url) throw new Error('Воркеры доступны только в браузере')
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(url, { type: 'module' })
+
+    worker.onmessage = (event) => {
+      const data = event.data as { type: string; message?: string } & Partial<T>
+      if (data.type === 'result') {
+        worker.terminate()
+        resolve(data as T)
+      } else if (data.type === 'error') {
+        worker.terminate()
+        reject(new Error(data.message || 'Неизвестная ошибка воркера'))
+      }
+    }
+
+    worker.onerror = (error) => {
+      worker.terminate()
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    worker.postMessage(payload, transfer)
+  })
+}
+
+async function cleanWithWorker(
+  kind: SupportedKind,
+  file: File,
+  options: CleanerOptions
+): Promise<WorkerResponse> {
+  const buffer = await file.arrayBuffer()
+  const payload = {
+    id: nanoid(),
+    name: file.name,
+    type: file.type,
+    buffer,
+    options
+  }
+  if (kind === 'image') {
+    return await runWorker(imageWorkerUrl, payload, [buffer])
+  }
+  if (kind === 'pdf') {
+    return await runWorker(pdfWorkerUrl, payload, [buffer])
+  }
+  if (kind === 'video') {
+    return await runWorker(videoWorkerUrl, payload, [buffer])
+  }
+  throw new Error('Очистка данного типа файлов не поддерживается')
+}
+
 export type QueueStatus = 'idle' | 'parsing' | 'parsed' | 'cleaning' | 'cleaned' | 'error'
 
 export interface QueueItem {
@@ -113,10 +184,12 @@ export function useFileQueue() {
     if (item.status === 'cleaning') return
     item.status = 'cleaning'
     try {
-      const arrayBuffer = await item.file.arrayBuffer()
-      item.cleanedBlob = new Blob([arrayBuffer], { type: item.file.type || 'application/octet-stream' })
+      const options = cleanerOptions[item.id] ?? {}
+      const response = await cleanWithWorker(item.kind, item.file, options)
+      const mimeType = response.mimeType || item.file.type || 'application/octet-stream'
+      item.cleanedBlob = new Blob([response.buffer], { type: mimeType })
       item.status = 'cleaned'
-      pushToast(`Файл «${item.file.name}» очищен (демо).`, 'success')
+      pushToast(`Файл «${item.file.name}» очищен.`, 'success')
     } catch (error) {
       item.status = 'error'
       item.error = error instanceof Error ? error.message : String(error)
