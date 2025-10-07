@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, toRaw } from 'vue'
 import { nanoid } from 'nanoid/non-secure'
 import type { NormalizedMetadata, SupportedKind } from './useMetadata'
 import { useMetadata } from './useMetadata'
@@ -184,7 +184,8 @@ export function useFileQueue() {
     if (item.status === 'cleaning') return
     item.status = 'cleaning'
     try {
-      const options = cleanerOptions[item.id] ?? {}
+      const rawOptions = cleanerOptions[item.id]
+      const options = rawOptions ? { ...toRaw(rawOptions) } : {}
       const response = await cleanWithWorker(item.kind, item.file, options)
       const mimeType = response.mimeType || item.file.type || 'application/octet-stream'
       item.cleanedBlob = new Blob([response.buffer], { type: mimeType })
